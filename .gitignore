@@ -1,37 +1,78 @@
-# Dependencies
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Diagnostic reports
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+lib-cov/
+coverage/
+*.lcov
+.nyc_output/
+
+# Build tools and caches
+.grunt/
+bower_components/
+.lock-wscript
+build/Release/
 node_modules/
-
-# Build output
-dist/
-out/
-build/
-
-# Vite
-.vite/
+jspm_packages/
+typings/
+*.tsbuildinfo
+.npm/
+.eslintcache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+.node_repl_history
+*.tgz
+.yarn-integrity
 
 # Environment variables
 .env
 .env.*
 !.env.example
 
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
+# Framework and bundler output
+.cache/
+.parcel-cache/
+.next/
+.nuxt/
+dist/
+.vuepress/dist/
+.serverless/
+.fusebox/
+.dynamodb/
+.tern-port
 
-# Electron packaging
+# Electron output
+out/
 release/
-*.blockmap
+
+# Temporary files
+.~*
+*.tmp
+*.temp
+*~
+src/star.ts~
+.parcelrc~
 
 # Operating system files
 .DS_Store
 Thumbs.db
 
-# IDE settings
+# IDE files
 .vscode/
 .idea/
-
-# Temporary files
-*.tmp
-*.temp
