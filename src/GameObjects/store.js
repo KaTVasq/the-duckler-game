@@ -1,0 +1,587 @@
+import Phaser from 'phaser';
+import AttackPotion from './Consumables/attackPotion.js';
+import SpeedPotion from './Consumables/SpeedPotion.js';
+import SpeedAttackPotion from './Consumables/SpeedAttackPotion.js';
+import Mcuaktro from './Weapons/Distance/mcuaktro.js';
+import Mazo from './Weapons/Melee/mazo.js';
+import Feather from './Consumables/Drops/dropFeather.js';
+import DropItem from './dropItem.js';
+// Imports necesarios para usar los Drop como representación visual de items en tienda
+import DropWeapon from './Consumables/Drops/dropWeapon.js';
+import DropFeather from './Consumables/Drops/dropFeather.js';
+
+/**
+ * Store
+ * Sistema de tienda en el mapa.
+ * Genera 3 pociones en el suelo con precio visible.
+ * El jugador puede comprarlas con panes (moneda) pulsando E.
+ *
+ * RESPONSABILIDADES:
+ *  - Generar las pociones en el suelo
+ *  - Asignar qué pociones aparecen (aleatorio)
+ *  - Mostrar precios
+ *  - Gestionar interacción (E)
+ *  - Gestionar compra
+ */
+export default class Store {
+
+    /**
+     * Configuración de tipos disponibles con sus precios fijos.
+     * AttackPotion → 1
+     * SpeedPotion → 2
+     * SpeedAttackPotion → 3
+     * Mcuaktro → 10
+
+     */
+    static POTION_CATALOG = [
+        { type: 'attack_potion',       PotionClass: AttackPotion,       price: 1 },
+        { type: 'speed_potion',        PotionClass: SpeedPotion,        price: 2 },
+        { type: 'speed_attack_potion', PotionClass: SpeedAttackPotion,  price: 3 },
+        { type: 'feather',             FeatherClass: Feather,           price: 5 },
+        { type: 'mcuaktro',            WeaponClass: Mcuaktro,           price: 10 },
+        { type: 'mazo',                WeaponClass: Mazo,               price: 8 },
+    ];
+
+    // Separación horizontal entre cada slot de la tienda (px)
+    static SLOT_SPACING = 120;
+
+    // Distancia máxima (px) a la que el jugador puede interactuar con una poción
+    static INTERACT_RADIUS = 140;
+
+    // Mapa de tipo de item → clase de arma (para saber qué DropWeapon instanciar)
+    static WEAPON_CLASS_MAP = {
+        mcuaktro: Mcuaktro,
+        mazo:     Mazo,
+    };
+
+    // Textura de la llave de cada tipo de arma (coincide con su texture key en Phaser)
+    static WEAPON_TEXTURE_MAP = {
+        mcuaktro: 'mcuaktro',
+        mazo:     'mazo',
+    };
+
+    /**
+     * @param {Phaser.Scene} scene         - Escena principal
+     * @param {number}       x             - Posición X central de la tienda
+     * @param {number}       y             - Posición Y de la tienda
+     * @param {object}       duck          - Referencia al jugador (Duck)
+     * @param {object}       consumableBar - Referencia a la barra de consumibles
+     */
+    constructor(scene, x, y, duck, consumableBar) {
+        this.scene        = scene;
+        this.x            = x;
+        this.y            = y;
+        this.duck         = duck;
+        this.consumableBar = consumableBar;
+
+        // Fallback local para interacción con teclado.
+        this.keyE = this.scene.input.keyboard.addKey('E');
+
+        // Slots activos: cada elemento es { sprite, priceLabel, breadIcon, type, price } o null si ya fue comprado
+        this.slots = [];
+
+        // Índice del slot más cercano al jugador (-1 = ninguno)
+        this._nearestSlotIndex = -1;
+
+        // Posiciones guardadas para poder regenerar los items en el reroll
+        this._spawnPositions = [];
+
+        // Datos del slot de reroll: { sprite, priceLabel, breadIcon, slotX, slotY }
+        this._rerollSlot = null;
+
+        // Precio actual del reroll — se duplica en cada uso
+        this.rerollPrice = 1;
+        this._rerollQueued = false;
+    }
+
+    // ─────────────────────────────────────────
+    // SPAWN DE POCIONES
+    // 5 pociones en línea horizontal, separadas uniformemente.
+    // Ejemplo visual:
+    //   [Poción]   [Poción]   [Poción]   [Poción]   [Poción]
+    //     1           2          2          3          1
+    // ─────────────────────────────────────────
+
+    /**
+     * Genera una poción aleatoria por cada posición recibida desde el mapa.
+     * Sustituye al spawn manual de _spawnPotions() cuando se usa la capa 'Store' de Tiled.
+     *
+     * Cada posición corresponde exactamente a un objeto de la capa 'Store':
+     *   { x: obj.x * SCALE, y: obj.y * SCALE }
+     *
+     * @param {Array<{x: number, y: number}>} positions - Posiciones escaladas de los objetos de slots del mapa
+     * @param {{x: number, y: number}|null} rerollPosition - Posición del objeto 'reroll' en el mapa
+     */
+    spawnAtPositions(positions, rerollPosition = null) {
+        const safePositions = Array.isArray(positions) ? positions : [];
+
+        if (safePositions.length === 0 && !rerollPosition) {
+            console.warn('[Store] spawnAtPositions: no se recibieron posiciones válidas.');
+            return;
+        }
+
+        // Guardar posiciones para poder hacer reroll más adelante
+        this._spawnPositions = safePositions;
+
+        // Generar los items en cada posición
+        this._spawnItemsAtPositions(safePositions);
+
+        // Crear el slot de reroll solo si viene definido en la capa del mapa.
+        if (rerollPosition) {
+            this._spawnRerollSlot(rerollPosition);
+        } else {
+            this._destroyRerollSlot();
+        }
+
+        console.log(`[Store] spawnAtPositions: ${this.slots.length} item(s) de tienda generado(s) desde el mapa.`);
+    }
+
+    /**
+     * Lógica interna de spawn de items.
+     * Se extrae de spawnAtPositions para poder reutilizarla en el reroll.
+     * @param {Array<{x: number, y: number}>} positions
+     * @private
+     */
+    _spawnItemsAtPositions(positions) {
+        positions.forEach(({ x: slotX, y: slotY }) => {
+            const slotIndex = this.slots.length;
+            // Selección aleatoria del catálogo (pueden repetirse entre slots)
+            const catalogEntry = Phaser.Utils.Array.GetRandom(Store.POTION_CATALOG);
+
+            // ── Representación visual usando el Drop system ──
+            // Se usa un drop interactuable para que el pato lo compre con E
+            // exactamente igual que hace con las armas.
+            const sprite = this._createDropVisual(catalogEntry.type, slotX, slotY);
+
+            sprite.storeSlotIndex = slotIndex;
+            sprite.interactionRadius = Store.INTERACT_RADIUS;
+            sprite.interact = () => {
+                this._tryPurchase(slotIndex);
+            };
+
+            if (this.scene.dropItems) {
+                this.scene.dropItems.add(sprite);
+            }
+
+            // Efecto flotante suave para que se vea viva
+            this.scene.tweens.add({
+                targets:  sprite,
+                y:        slotY - 5,
+                duration: 900,
+                ease:     'Sine.easeInOut',
+                yoyo:     true,
+                repeat:   -1
+            });
+
+            // ── Texto de precio debajo del icono ──
+            // Alineado con la poción
+            const { priceLabel, breadIcon } = this._createPriceDisplay(
+                slotX,
+                slotY + 46,
+                catalogEntry.price,
+                '#FFD700'
+            );
+
+            // itemCategory identifica el flujo de compra:
+            //   "weapon"  → equipar directamente al jugador
+            //   "feather" → sumar +1 al contador de plumas
+            //   "potion"  → añadir a consumable bar (flujo original)
+            const itemCategory = Store.WEAPON_CLASS_MAP[catalogEntry.type]
+                ? 'weapon'
+                : catalogEntry.type === 'feather'
+                    ? 'feather'
+                    : 'potion';
+
+            this.slots.push({
+                sprite,
+                priceLabel,
+                breadIcon,
+                type:         catalogEntry.type,
+                itemCategory,
+                weaponClass:  Store.WEAPON_CLASS_MAP[catalogEntry.type] || null,
+                price:        catalogEntry.price,
+                slotX,
+                slotY,
+            });
+        });
+    }
+
+    /**
+     * Crea la representación visual de un item de tienda usando el Drop system.
+     * - Armas → DropWeapon (escala y textura correctas automáticamente)
+     * - Pluma → DropFeather (escala correcta automáticamente)
+     * - Pociones → add.image (no tienen Drop dedicado, mantienen su sprite)
+     *
+     * En todos los casos se desactivan físicas para que el item quede estático
+     * y no sea recogido automáticamente al entrar en rango.
+     *
+     * @param {string} type   - Tipo del item del catálogo
+     * @param {number} slotX  - Posición X en el mundo
+     * @param {number} slotY  - Posición Y en el mundo
+     * @returns {Phaser.GameObjects.GameObject} El sprite/drop creado
+     * @private
+     */
+    _createDropVisual(type, slotX, slotY) {
+        let visual;
+
+        if (Store.WEAPON_CLASS_MAP[type]) {
+            // ── Armas → textura y escala de drop de arma ──
+            const textureKey = Store.WEAPON_TEXTURE_MAP[type];
+            visual = new DropItem(this.scene, slotX, slotY, textureKey);
+            visual.setScale(1.5);
+        } else if (type === 'feather') {
+            // ── Pluma → textura y escala del drop de pluma ──
+            visual = new DropItem(this.scene, slotX, slotY, 'feather_icon');
+            visual.setScale(0.08);
+        } else {
+            // ── Consumibles → sprite interactuable tipo drop ──
+            visual = new DropItem(this.scene, slotX, slotY, type);
+            visual.setScale(4);
+        }
+
+        visual.setDepth(100);
+        return visual;
+    }
+
+    /**
+     * Crea el slot de reroll en la posición definida por el objeto 'reroll' del mapa.
+     * @param {{x: number, y: number}} position
+     * @private
+     */
+    _spawnRerollSlot(position) {
+        this._destroyRerollSlot();
+
+        const rerollX = position.x;
+        const rerollY = position.y;
+
+        // Sprite de reroll como DropItem para que implemente `isNear()`
+        const sprite = new DropItem(this.scene, rerollX, rerollY, 'reroll_icon');
+        sprite.setScale(2);
+        sprite.setDepth(100);
+        sprite.interactionRadius = Store.INTERACT_RADIUS;
+        sprite.interact = () => {
+            this._queueReroll();
+        };
+
+        if (this.scene.dropItems) {
+            this.scene.dropItems.add(sprite);
+        }
+
+        // Etiqueta de precio con el precio actual del reroll
+        const { priceLabel, breadIcon } = this._createPriceDisplay(
+            rerollX,
+            rerollY + 42,
+            this.rerollPrice,
+            '#FF8C00'
+        );
+
+        this._rerollSlot = {
+            sprite,
+            priceLabel,
+            breadIcon,
+            slotX: rerollX,
+            slotY: rerollY,
+        };
+    }
+
+    _destroyRerollSlot() {
+        if (!this._rerollSlot) return;
+
+        if (this.scene.dropItems && this._rerollSlot.sprite) {
+            this.scene.dropItems.remove(this._rerollSlot.sprite, false, false);
+        }
+
+        this._rerollSlot.sprite?.destroy();
+        this._rerollSlot.priceLabel?.destroy();
+        this._rerollSlot.breadIcon?.destroy();
+        this._rerollSlot = null;
+    }
+
+    _queueReroll() {
+        if (this._rerollQueued) return;
+        this._rerollQueued = true;
+
+        this.scene.time.delayedCall(0, () => {
+            this._rerollQueued = false;
+            this._tryReroll();
+        });
+    }
+
+    _createPriceDisplay(x, y, price, color = '#FFD700') {
+        const priceLabel = this.scene.add.text(x - 18, y, `${price}`, {
+            fontSize:        '28px',
+            fill:            color,
+            fontStyle:       'bold',
+            stroke:          '#000000',
+            strokeThickness: 3,
+            align:           'center',
+        });
+        priceLabel.setOrigin(0.5, 0);
+        priceLabel.setDepth(101);
+
+        const breadIcon = this.scene.add.image(0, 0, 'bread_item');
+        breadIcon.setOrigin(0, 0.5);
+        breadIcon.setScale(2.2);
+        breadIcon.setDepth(101);
+
+        this._positionBreadIcon(priceLabel, breadIcon);
+
+        return { priceLabel, breadIcon };
+    }
+
+    _positionBreadIcon(priceLabel, breadIcon) {
+        if (!priceLabel || !breadIcon) return;
+
+        const rightEdgeX = priceLabel.x + (priceLabel.displayWidth / 2);
+        breadIcon.setPosition(rightEdgeX + 8, priceLabel.y + 12);
+    }
+
+    // ─────────────────────────────────────────
+    // UPDATE — llamar desde MainScene.update()
+    // ─────────────────────────────────────────
+
+    /**
+     * Actualiza la tienda cada frame:
+     *  - Detecta qué poción está más cerca del jugador
+     *  - Muestra/oculta el indicador [E]
+     *  - Gestiona la compra al pulsar E
+     *
+     * @param {boolean} eJustDown - true si E fue pulsada este frame (calculado en MainScene)
+     */
+    update(eJustDown = false) {
+        if (!this.duck || !this.duck.active) return;
+
+        this._nearestSlotIndex = -1;
+        let nearestDist = Store.INTERACT_RADIUS;
+
+        // ── Detectar la poción más cercana dentro del radio de interacción ──
+        this.slots.forEach((slot, index) => {
+            if (!slot) return; // slot ya fue comprado y limpiado
+
+            const dist = Phaser.Math.Distance.Between(
+                this.duck.x, this.duck.y,
+                slot.slotX,  slot.slotY
+            );
+
+            if (dist <= nearestDist) {
+                nearestDist            = dist;
+                this._nearestSlotIndex = index;
+            }
+        });
+
+        // La compra se resuelve desde el sistema de drops del pato,
+        // igual que con las armas. Aquí solo mantenemos la detección de cercanía.
+    }
+
+    // ─────────────────────────────────────────
+    // COMPRA
+    // ─────────────────────────────────────────
+
+    /**
+     * Intenta comprar la poción del slot indicado.
+     *
+     * AL PULSAR E:
+     *   SI tiene dinero:
+     *     1. Restar panes: scene.addBread(-precio)
+     *     2. Eliminar poción del suelo
+     *     3. Añadir a consumable bar: addItemByType(type)
+     *   SI NO tiene dinero:
+     *     - No hacer nada
+     *
+     * @param {number} slotIndex - Índice del slot a comprar
+     * @private
+     */
+    _tryPurchase(slotIndex) {
+        const slot = this.slots[slotIndex];
+        if (!slot) return;
+
+        const { type, itemCategory, price } = slot;
+
+        // ── Condición: el jugador debe tener suficientes panes ──
+        if (this.scene.breadCount < price) {
+            // No hay dinero suficiente — no pasa nada
+            console.log(`[Store] Sin panes suficientes. Necesitas ${price}, tienes ${this.scene.breadCount}`);
+            this._flashNoBread(slot);
+            return;
+        }
+
+        // Tiene dinero — proceder con la compra
+
+        // 1. Restar panes
+        this.scene.addBread(-price);
+
+        // 2. Aplicar efecto según categoría del item
+        this._applyPurchaseEffect(slot);
+
+        // 3. Eliminar item del suelo y limpiar slot
+        this._destroySlot(slotIndex);
+
+        console.log(`[Store] Comprado: ${type} (${itemCategory}) por ${price} panes. Panes restantes: ${this.scene.breadCount}`);
+    }
+
+    /**
+     * Aplica el efecto de compra según la categoría del item:
+     *   "weapon"  → equipa el arma directamente usando la lógica de DropWeapon.swapWeapon()
+     *   "feather" → suma +1 pluma usando duck.addFeather() igual que DropFeather.interact()
+     *   "potion"  → añade a consumable bar (flujo original, sin cambios)
+     *
+     * No se reinventa lógica: se reutiliza la de DropWeapon y DropFeather.
+     *
+     * @param {object} slot - Slot activo con { sprite, type, itemCategory, price, slotX, slotY }
+     * @private
+     */
+    _applyPurchaseEffect(slot) {
+        const { itemCategory, weaponClass } = slot;
+
+        switch (itemCategory) {
+            case 'weapon':
+                // Compra de arma: equipa la clase del item comprado.
+                if (weaponClass && this.duck) {
+                    const newWeapon = new weaponClass(this.scene, this.duck, this.duck.weaponBar);
+                    this.duck.setWeapon(newWeapon);
+                    newWeapon.setBar(this.duck.weaponBar);
+                }
+                break;
+
+            case 'feather':
+                // Reutiliza la misma llamada que DropFeather.interact(): +1 pluma
+                if (this.duck && typeof this.duck.addFeather === 'function') {
+                    this.duck.addFeather(1);
+                }
+                break;
+
+            case 'potion':
+            default:
+                // Flujo original — NO se modifica
+                this._addToConsumableBar(slot.type);
+                break;
+        }
+    }
+
+    /**
+     * Intenta ejecutar el reroll de la tienda.
+     * Condición: el jugador debe tener suficientes panes (>= rerollPrice).
+     *
+     * AL EJECUTAR:
+     *  1. Restar panes
+     *  2. Duplicar el precio del reroll para el siguiente uso
+     *  3. Destruir todos los items actuales
+     *  4. Regenerar nuevos items en las mismas posiciones del mapa
+     * @private
+     */
+    _tryReroll() {
+        if (!this._rerollSlot) return;
+
+        // ── Condición: panes suficientes para el reroll ──
+        if (this.scene.breadCount < this.rerollPrice) {
+            console.log(`[Store] Reroll: Sin panes suficientes. Necesitas ${this.rerollPrice}, tienes ${this.scene.breadCount}`);
+            this._flashNoBread(this._rerollSlot);
+            return;
+        }
+
+        // 1. Restar panes
+        this.scene.addBread(-this.rerollPrice);
+        console.log(`[Store] Reroll ejecutado por ${this.rerollPrice} panes.`);
+
+        // 2. Duplicar precio para el siguiente reroll
+        this.rerollPrice *= 2;
+
+        // 3. Destruir todos los items actuales
+        this._destroyAllSlots();
+
+        // 4. Regenerar items en las mismas posiciones del mapa
+        this._spawnItemsAtPositions(this._spawnPositions);
+
+        // 5. Actualizar la etiqueta de precio del reroll con el nuevo valor
+        if (this._rerollSlot.priceLabel && this._rerollSlot.priceLabel.active) {
+            this._rerollSlot.priceLabel.setText(`${this.rerollPrice}`);
+            this._positionBreadIcon(this._rerollSlot.priceLabel, this._rerollSlot.breadIcon);
+        }
+
+        console.log(`[Store] Reroll completado. ${this.slots.length} nuevos items generados. Próximo reroll: ${this.rerollPrice} panes.`);
+    }
+
+    /**
+     * Añade una poción al inventario del jugador a través de la ConsumableBar.
+     * Usa el sistema existente de consumables — NO crea lógica nueva de inventario.
+     * Respeta los slots disponibles (máx 9).
+     * @param {string} type - Tipo de consumible (ej: 'attack_potion')
+     * @private
+     */
+    _addToConsumableBar(type) {
+        if (!this.duck.consumables) {
+            this.duck.consumables = [];
+        }
+
+        // Respetar slots disponibles (máx 9)
+        if (this.duck.consumables.length >= 9) {
+            console.log('[Store] Inventario lleno (máx 9). No se puede añadir el item.');
+            return;
+        }
+
+        // Usar el sistema existente de consumables
+        this.duck.consumables.push({
+            type:  type,
+            value: 1,
+        });
+    }
+
+    /**
+     * Destruye todos los elementos visuales de un slot y lo marca como nulo.
+     * @param {number} slotIndex
+     * @private
+     */
+    _destroySlot(slotIndex) {
+        const slot = this.slots[slotIndex];
+        if (!slot) return;
+
+        slot.sprite?.destroy();
+        slot.priceLabel?.destroy();
+        slot.breadIcon?.destroy();
+
+        // Marcar como comprado/vacío
+        this.slots[slotIndex] = null;
+    }
+
+    /**
+     * Destruye todos los slots activos de la tienda sin tocar el slot de reroll.
+     * Usado internamente por el sistema de reroll.
+     * @private
+     */
+    _destroyAllSlots() {
+        this.slots.forEach((_, i) => this._destroySlot(i));
+        this.slots = [];
+    }
+
+    /**
+     * Feedback visual cuando no hay suficientes panes:
+     * el precio parpadea en rojo brevemente.
+     * @param {object} slot
+     * @private
+     */
+    _flashNoBread(slot) {
+        if (!slot?.priceLabel) return;
+
+        const originalColor = '#FFD700';
+        slot.priceLabel.setStyle({ fill: '#FF4444' });
+
+        this.scene.time.delayedCall(400, () => {
+            if (slot.priceLabel && slot.priceLabel.active) {
+                slot.priceLabel.setStyle({ fill: originalColor });
+            }
+        });
+    }
+
+    /**
+     * Destruye completamente la tienda (todos los slots, cartel y listeners).
+     * Llamar si la tienda desaparece del mapa.
+     */
+    destroy() {
+        this.slots.forEach((_, i) => this._destroySlot(i));
+        this.slots = [];
+        this._signText?.destroy();
+
+        // Destruir slot de reroll
+        this._destroyRerollSlot();
+    }
+}

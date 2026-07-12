@@ -1,0 +1,44 @@
+{
+  "name": "the-duckler",
+  "version": "1.0.0",
+  "main": "./main.js",
+  "description": "Top-down action RPG developed with Phaser, JavaScript and Electron.",
+  "scripts": {
+    "build:win": "npm run electron && npx electron-builder --win --config",
+    "build:mac": "npm run electron && npx electron-builder --mac --config",
+    "build:linux": "npm run electron && npx electron-builder --linux --config",
+    "electron": "npx electron-vite build",
+    "start": "npm i && npx vite",
+    "build": "npm i && npx vite build --outDir docs/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KaTVasq/the-duckler-game.git"
+  },
+  "keywords": [
+    "phaser",
+    "javascript",
+    "electron",
+    "vite",
+    "video-game",
+    "action-rpg",
+    "pixel-art"
+  ],
+  "author": "Katty Vasquez Peinado <katyperry.kvp@gmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/KaTVasq/the-duckler-game/issues"
+  },
+  "homepage": "https://github.com/KaTVasq/the-duckler-game#readme",
+  "type": "module",
+  "devDependencies": {
+    "electron": "^34.0.1",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "rollup": "^4.32.1",
+    "vite": "5.4.6"
+  },
+  "dependencies": {
+    "phaser": "3.85.2"
+  }
+}
