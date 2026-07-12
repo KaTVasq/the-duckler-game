@@ -257,5 +257,4 @@ This project is distributed under the MIT License included in the repository.
 
 **Katty Vasquez Peinado**
 
-- [LinkedIn](https://linkedin.com/in/katty-vasquez)
 - [GitHub](https://github.com/KaTVasq)
